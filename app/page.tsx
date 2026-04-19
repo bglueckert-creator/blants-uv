@@ -324,7 +324,7 @@ export default function Home() {
             lineHeight: 0.95,
           }}
         >
-          BLANTS UV
+          BLANT'S UV
         </h1>
 
         <p
