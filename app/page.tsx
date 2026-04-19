@@ -324,7 +324,7 @@ export default function Home() {
             lineHeight: 0.95,
           }}
         >
-          BLANTS UV
+          SUN FREAK
         </h1>
 
         <p
