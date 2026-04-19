@@ -53,6 +53,18 @@ function formatLocationName(data: any) {
   );
 }
 
+function formatDayLabel(date: Date) {
+  return date.toLocaleDateString([], {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+  });
+}
+
+function getDateKey(date: Date) {
+  return date.toDateString();
+}
+
 function CustomTooltip({ active, payload, label }: any) {
   if (!active || !payload || !payload.length) return null;
 
@@ -76,12 +88,29 @@ function CustomTooltip({ active, payload, label }: any) {
 
 export default function Home() {
   const [uvi, setUvi] = useState<number | null>(null);
-  const [forecast, setForecast] = useState<any[]>([]);
   const [location, setLocation] = useState("Consulting the sun gods...");
   const [currentHour, setCurrentHour] = useState<number | null>(null);
   const [activePoint, setActivePoint] = useState<any | null>(null);
+  const [selectedDayOffset, setSelectedDayOffset] = useState(0);
+  const [allDayData, setAllDayData] = useState<Record<string, any[]>>({});
+  const [availableDates, setAvailableDates] = useState<string[]>([]);
+  const [chartStatus, setChartStatus] = useState("Loading UV curve...");
+  const [coords, setCoords] = useState<{ latitude: number; longitude: number } | null>(null);
+  const [isUsingCurrentLocation, setIsUsingCurrentLocation] = useState(true);
+  const [showLocationSearch, setShowLocationSearch] = useState(false);
+  const [locationQuery, setLocationQuery] = useState("");
+  const [locationResults, setLocationResults] = useState<any[]>([]);
+  const [searchingLocations, setSearchingLocations] = useState(false);
 
-  const loadUvForLocation = async (latitude: number, longitude: number) => {
+  const loadUvForLocation = async (
+    latitude: number,
+    longitude: number,
+    options?: { customLocationLabel?: string; useCurrentLocation?: boolean }
+  ) => {
+    setCoords({ latitude, longitude });
+    setIsUsingCurrentLocation(options?.useCurrentLocation ?? false);
+    setSelectedDayOffset(0);
+
     const uvRes = await fetch(
       `https://currentuvindex.com/api/v1/uvi?latitude=${latitude}&longitude=${longitude}`
     );
@@ -90,52 +119,74 @@ export default function Home() {
     setUvi(uvData.now.uvi);
     setCurrentHour(new Date().getHours());
 
-    const today = new Date().toDateString();
     const history = Array.isArray(uvData?.history) ? uvData.history : [];
     const future = Array.isArray(uvData?.forecast) ? uvData.forecast : [];
     const combined = [...history, ...future];
 
-    const todayPoints = combined
+    const grouped: Record<string, any[]> = {};
+
+    combined
       .filter((d: any) => d?.time)
-      .map((d: any) => {
+      .forEach((d: any) => {
         const dt = new Date(d.time);
-        return {
-          dayString: dt.toDateString(),
+        const key = getDateKey(dt);
+
+        if (!grouped[key]) grouped[key] = [];
+
+        grouped[key].push({
+          dayKey: key,
           hour24: dt.getHours(),
           hourLabel: formatHourLabel(d.time),
           uvi: Number(d.uvi ?? 0),
-        };
-      })
-      .filter((d: any) => d.dayString === today);
+        });
+      });
 
-    const uniqueByHour = Array.from(
-      new Map(todayPoints.map((d: any) => [d.hour24, d])).values()
-    ).sort((a: any, b: any) => a.hour24 - b.hour24);
+    const normalized: Record<string, any[]> = {};
 
-    const positiveHours = uniqueByHour
-      .filter((d: any) => d.uvi > 0)
-      .map((d: any) => d.hour24);
+    Object.entries(grouped).forEach(([key, points]) => {
+      const uniqueByHour = Array.from(
+        new Map(points.map((d: any) => [d.hour24, d])).values()
+      ).sort((a: any, b: any) => a.hour24 - b.hour24);
 
-    if (positiveHours.length > 0) {
-      const startHour = Math.max(0, Math.min(...positiveHours) - 1);
-      const endHour = Math.min(23, Math.max(...positiveHours) + 1);
-      const hourMap = new Map(uniqueByHour.map((d: any) => [d.hour24, d]));
-      const expanded = [];
+      const positiveHours = uniqueByHour
+        .filter((d: any) => d.uvi > 0)
+        .map((d: any) => d.hour24);
 
-      for (let h = startHour; h <= endHour; h++) {
-        const existing = hourMap.get(h);
-        expanded.push(
-          existing || {
-            hour24: h,
-            hourLabel: hourLabelFromNumber(h),
-            uvi: 0,
-          }
-        );
+      if (positiveHours.length > 0) {
+        const startHour = Math.max(0, Math.min(...positiveHours) - 1);
+        const endHour = Math.min(23, Math.max(...positiveHours) + 1);
+        const hourMap = new Map(uniqueByHour.map((d: any) => [d.hour24, d]));
+        const expanded = [];
+
+        for (let h = startHour; h <= endHour; h++) {
+          const existing = hourMap.get(h);
+          expanded.push(
+            existing || {
+              dayKey: key,
+              hour24: h,
+              hourLabel: hourLabelFromNumber(h),
+              uvi: 0,
+            }
+          );
+        }
+
+        normalized[key] = expanded;
+      } else {
+        normalized[key] = uniqueByHour;
       }
+    });
 
-      setForecast(expanded);
-    } else {
-      setForecast(uniqueByHour);
+    const sortedDates = Object.keys(normalized).sort(
+      (a, b) => new Date(a).getTime() - new Date(b).getTime()
+    );
+
+    setAllDayData(normalized);
+    setAvailableDates(sortedDates);
+    setChartStatus(sortedDates.length ? "" : "No UV data available.");
+
+    if (options?.customLocationLabel) {
+      setLocation(`You are frying in ${options.customLocationLabel}`);
+      return;
     }
 
     try {
@@ -150,14 +201,36 @@ export default function Home() {
     }
   };
 
-  useEffect(() => {
+  const loadCurrentLocation = async () => {
     navigator.geolocation.getCurrentPosition(
       async (pos) => {
         const { latitude, longitude } = pos.coords;
-        await loadUvForLocation(latitude, longitude);
+        await loadUvForLocation(latitude, longitude, { useCurrentLocation: true });
       },
       () => setLocation("Location access denied")
     );
+  };
+
+  const searchLocations = async () => {
+    if (!locationQuery.trim()) return;
+    setSearchingLocations(true);
+    try {
+      const res = await fetch(
+        `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(
+          locationQuery.trim()
+        )}&count=8&language=en&format=json`
+      );
+      const data = await res.json();
+      setLocationResults(data.results || []);
+    } catch {
+      setLocationResults([]);
+    } finally {
+      setSearchingLocations(false);
+    }
+  };
+
+  useEffect(() => {
+    loadCurrentLocation();
   }, []);
 
   useEffect(() => {
@@ -172,28 +245,59 @@ export default function Home() {
     meta.content = themeColor;
   }, [uvi]);
 
+  const todayBase = new Date();
+  todayBase.setHours(0, 0, 0, 0);
+
+  const selectedDate = useMemo(() => {
+    const d = new Date(todayBase);
+    d.setDate(d.getDate() + selectedDayOffset);
+    return d;
+  }, [selectedDayOffset]);
+
+  const selectedDateKey = getDateKey(selectedDate);
+  const forecast = allDayData[selectedDateKey] || [];
+
   const tier = uvi !== null ? getTier(uvi) : null;
   const backgroundColor = tier?.bg || "#fffdf7";
 
   const currentMarker = useMemo(() => {
-    if (currentHour === null || forecast.length === 0) return undefined;
+    const isToday = selectedDayOffset === 0;
+    if (!isToday || currentHour === null || forecast.length === 0) return undefined;
+
     const firstHour = forecast[0]?.hour24;
     const lastHour = forecast[forecast.length - 1]?.hour24;
     if (firstHour === undefined || lastHour === undefined) return undefined;
+
     const clampedHour = Math.max(firstHour, Math.min(currentHour, lastHour));
     return hourLabelFromNumber(clampedHour);
-  }, [currentHour, forecast]);
+  }, [currentHour, forecast, selectedDayOffset]);
 
-  const handleShare = async () => {
-    const shareText = `${location.replace("You are frying in ", "") || "Someone"} is currently ${tier?.label || "having a sun moment"} at UV ${uvi?.toFixed(1) ?? "--"} ☀️`;
-    try {
-      if (navigator.share) {
-        await navigator.share({ title: "BLANTS UV", text: shareText, url: window.location.href });
-      } else {
-        await navigator.clipboard.writeText(`${shareText} ${window.location.href}`);
-        alert("Copied share text to clipboard ☀️");
-      }
-    } catch {}
+  const minOffset = useMemo(() => {
+    if (!availableDates.length) return 0;
+    const first = new Date(availableDates[0]);
+    first.setHours(0, 0, 0, 0);
+    return Math.round((first.getTime() - todayBase.getTime()) / 86400000);
+  }, [availableDates]);
+
+  const maxOffset = useMemo(() => {
+    if (!availableDates.length) return 0;
+    const last = new Date(availableDates[availableDates.length - 1]);
+    last.setHours(0, 0, 0, 0);
+    return Math.round((last.getTime() - todayBase.getTime()) / 86400000);
+  }, [availableDates]);
+
+  const canGoPrev = selectedDayOffset > minOffset;
+  const canGoNext = selectedDayOffset < maxOffset;
+
+  const handleShare = () => {
+    const shareText = `${
+      location.replace("You are frying in ", "") || "Someone"
+    } is currently ${tier?.label || "having a sun moment"} at UV ${
+      uvi?.toFixed(1) ?? "--"
+    } ☀️`;
+
+    const body = encodeURIComponent(`${shareText} ${window.location.href}`);
+    window.location.href = `sms:&body=${body}`;
   };
 
   return (
@@ -210,10 +314,28 @@ export default function Home() {
     >
       <div style={{ width: "100%", maxWidth: 390, textAlign: "center" }}>
         <div style={{ fontSize: 42, lineHeight: 1, marginTop: 4 }}>☀️</div>
-        <h1 style={{ fontSize: 64, marginTop: 4, marginBottom: 0, letterSpacing: 1, lineHeight: 0.95 }}>
+
+        <h1
+          style={{
+            fontSize: 64,
+            marginTop: 4,
+            marginBottom: 0,
+            letterSpacing: 1,
+            lineHeight: 0.95,
+          }}
+        >
           BLANTS UV
         </h1>
-        <p style={{ marginTop: -2, marginBottom: 16, fontSize: 32, letterSpacing: 1, lineHeight: 0.95 }}>
+
+        <p
+          style={{
+            marginTop: -2,
+            marginBottom: 16,
+            fontSize: 32,
+            letterSpacing: 1,
+            lineHeight: 0.95,
+          }}
+        >
           SUN FREAK FORECAST
         </p>
 
@@ -222,7 +344,12 @@ export default function Home() {
         ) : (
           <>
             <div
-              style={{ fontSize: 200, lineHeight: 0.9, marginTop: 4, textShadow: "0 4px 14px rgba(0,0,0,0.12)" }}
+              style={{
+                fontSize: 200,
+                lineHeight: 0.9,
+                marginTop: 4,
+                textShadow: "0 4px 14px rgba(0,0,0,0.12)",
+              }}
             >
               {uvi.toFixed(1)}
             </div>
@@ -230,69 +357,280 @@ export default function Home() {
           </>
         )}
 
-        {forecast.length > 0 && (
+        <div
+          style={{
+            marginTop: 18,
+            padding: 12,
+            borderRadius: 18,
+            border: "1px solid rgba(0,0,0,0.08)",
+            background: "rgba(255,255,255,0.78)",
+            backdropFilter: "blur(6px)",
+            boxShadow: "0 12px 28px rgba(0,0,0,0.06)",
+          }}
+        >
           <div
             style={{
-              marginTop: 18,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              marginBottom: 8,
+            }}
+          >
+            <button
+              disabled={!canGoPrev}
+              onClick={() => setSelectedDayOffset((p) => p - 1)}
+              style={{
+                opacity: canGoPrev ? 1 : 0.3,
+                fontSize: 18,
+                background: "none",
+                border: "none",
+                cursor: canGoPrev ? "pointer" : "default",
+              }}
+            >
+              ◀
+            </button>
+
+            <div style={{ fontSize: 16 }}>{formatDayLabel(selectedDate)}</div>
+
+            <button
+              disabled={!canGoNext}
+              onClick={() => setSelectedDayOffset((p) => p + 1)}
+              style={{
+                opacity: canGoNext ? 1 : 0.3,
+                fontSize: 18,
+                background: "none",
+                border: "none",
+                cursor: canGoNext ? "pointer" : "default",
+              }}
+            >
+              ▶
+            </button>
+          </div>
+
+          {forecast.length > 0 ? (
+            <>
+              <div style={{ height: 168 }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart
+                    data={forecast}
+                    margin={{ top: 10, right: 4, left: -18, bottom: 0 }}
+                    onClick={(state: any) => {
+                      if (state?.activePayload?.[0]?.payload) {
+                        setActivePoint(state.activePayload[0].payload);
+                      }
+                    }}
+                  >
+                    <XAxis
+                      dataKey="hourLabel"
+                      tick={{ fontSize: 11 }}
+                      tickLine={false}
+                      axisLine={false}
+                      interval={0}
+                    />
+                    <YAxis
+                      domain={[0, 12]}
+                      tick={{ fontSize: 11 }}
+                      width={24}
+                      tickLine={false}
+                      axisLine={false}
+                    />
+                    <Tooltip content={<CustomTooltip />} />
+
+                    {currentMarker && (
+                      <ReferenceLine
+                        x={currentMarker}
+                        stroke="#777"
+                        strokeDasharray="4 4"
+                        ifOverflow="extendDomain"
+                      />
+                    )}
+
+                    <Line
+                      type="monotone"
+                      dataKey="uvi"
+                      stroke="#111"
+                      strokeWidth={3}
+                      dot={{ r: 0 }}
+                      activeDot={{ r: 6 }}
+                    />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+
+              {activePoint && (
+                <div
+                  style={{
+                    marginTop: 8,
+                    fontSize: 14,
+                    textAlign: "left",
+                    color: "#333",
+                  }}
+                >
+                  {activePoint.hourLabel} · UV {Number(activePoint.uvi).toFixed(1)}
+                </div>
+              )}
+
+              <button
+                onClick={handleShare}
+                style={{
+                  marginTop: 10,
+                  width: "100%",
+                  border: "none",
+                  borderRadius: 14,
+                  padding: "10px 8px",
+                  fontSize: 18,
+                  background: "rgba(0,0,0,0.06)",
+                  cursor: "pointer",
+                }}
+              >
+                ☀️ SHARE MY UV
+              </button>
+            </>
+          ) : (
+            <div
+              style={{
+                height: 168,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                fontSize: 16,
+                color: "#555",
+              }}
+            >
+              {chartStatus}
+            </div>
+          )}
+        </div>
+
+        <div style={{ marginTop: 8, fontSize: 17, color: "#333" }}>{location}</div>
+
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "1fr 1fr",
+            gap: 8,
+            width: "100%",
+            marginTop: 8,
+          }}
+        >
+          <button
+            onClick={() => setShowLocationSearch((s) => !s)}
+            style={{
+              border: "none",
+              borderRadius: 14,
+              padding: "9px 12px",
+              fontSize: 16,
+              background: "rgba(0,0,0,0.06)",
+              cursor: "pointer",
+            }}
+          >
+            Specify Location
+          </button>
+
+          <button
+            onClick={loadCurrentLocation}
+            disabled={isUsingCurrentLocation}
+            style={{
+              border: "none",
+              borderRadius: 14,
+              padding: "9px 12px",
+              fontSize: 16,
+              background: isUsingCurrentLocation ? "rgba(0,0,0,0.04)" : "rgba(0,0,0,0.06)",
+              opacity: isUsingCurrentLocation ? 0.5 : 1,
+              cursor: isUsingCurrentLocation ? "default" : "pointer",
+            }}
+          >
+            Current Location
+          </button>
+        </div>
+
+        {showLocationSearch && (
+          <div
+            style={{
+              marginTop: 8,
               padding: 12,
               borderRadius: 18,
               border: "1px solid rgba(0,0,0,0.08)",
               background: "rgba(255,255,255,0.78)",
               backdropFilter: "blur(6px)",
               boxShadow: "0 12px 28px rgba(0,0,0,0.06)",
+              textAlign: "left",
             }}
           >
-            <div style={{ fontSize: 16, textAlign: "left", marginBottom: 8, letterSpacing: 0.3 }}>
-              TODAY’S UV CURVE
+            <div style={{ fontSize: 16, marginBottom: 8 }}>Search for a location</div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <input
+                value={locationQuery}
+                onChange={(e) => setLocationQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") searchLocations();
+                }}
+                placeholder="Miami, Rockaway, 11224..."
+                style={{
+                  flex: 1,
+                  borderRadius: 12,
+                  border: "1px solid rgba(0,0,0,0.12)",
+                  padding: "10px 12px",
+                  fontSize: 14,
+                  outline: "none",
+                }}
+              />
+              <button
+                onClick={searchLocations}
+                style={{
+                  border: "none",
+                  borderRadius: 12,
+                  padding: "10px 12px",
+                  fontSize: 14,
+                  background: "rgba(0,0,0,0.08)",
+                  cursor: "pointer",
+                }}
+              >
+                Search
+              </button>
             </div>
-            <div style={{ height: 168 }}>
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart
-                  data={forecast}
-                  margin={{ top: 10, right: 4, left: -18, bottom: 0 }}
-                  onClick={(state: any) => {
-                    if (state?.activePayload?.[0]?.payload) {
-                      setActivePoint(state.activePayload[0].payload);
-                    }
-                  }}
-                >
-                  <XAxis dataKey="hourLabel" tick={{ fontSize: 11 }} tickLine={false} axisLine={false} interval={0} />
-                  <YAxis domain={[0, 12]} tick={{ fontSize: 11 }} width={24} tickLine={false} axisLine={false} />
-                  <Tooltip content={<CustomTooltip />} />
 
-                  {currentMarker && (
-                    <ReferenceLine x={currentMarker} stroke="#777" strokeDasharray="4 4" ifOverflow="extendDomain" />
-                  )}
-
-                  <Line type="monotone" dataKey="uvi" stroke="#111" strokeWidth={3} dot={{ r: 0 }} activeDot={{ r: 6 }} />
-                </LineChart>
-              </ResponsiveContainer>
-            </div>
-            {activePoint && (
-              <div style={{ marginTop: 8, fontSize: 14, textAlign: "left", color: "#333" }}>
-                {activePoint.hourLabel} · UV {Number(activePoint.uvi).toFixed(1)}
-              </div>
+            {searchingLocations && (
+              <div style={{ marginTop: 10, fontSize: 14, color: "#555" }}>Searching...</div>
             )}
 
-            <button
-              onClick={handleShare}
-              style={{
-                marginTop: 10,
-                width: "100%",
-                border: "none",
-                borderRadius: 14,
-                padding: "10px 8px",
-                fontSize: 18,
-                background: "rgba(0,0,0,0.06)",
-                cursor: "pointer",
-              }}
-            >
-              ☀️ SHARE MY UV
-            </button>
+            {!searchingLocations && locationResults.length > 0 && (
+              <div style={{ marginTop: 10, display: "grid", gap: 8 }}>
+                {locationResults.map((result) => {
+                  const label = [result.name, result.admin1, result.country]
+                    .filter(Boolean)
+                    .join(", ");
+
+                  return (
+                    <button
+                      key={`${result.latitude}-${result.longitude}-${label}`}
+                      onClick={async () => {
+                        await loadUvForLocation(result.latitude, result.longitude, {
+                          customLocationLabel: label,
+                          useCurrentLocation: false,
+                        });
+                        setShowLocationSearch(false);
+                        setLocationQuery(label);
+                        setLocationResults([]);
+                      }}
+                      style={{
+                        border: "1px solid rgba(0,0,0,0.08)",
+                        borderRadius: 12,
+                        padding: "10px 12px",
+                        fontSize: 14,
+                        textAlign: "left",
+                        background: "white",
+                        cursor: "pointer",
+                      }}
+                    >
+                      {label}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
           </div>
         )}
-
-        <div style={{ marginTop: 16, fontSize: 15, color: "#333" }}>{location}</div>
       </div>
     </div>
   );
